@@ -1,0 +1,144 @@
+import random
+
+# --- Constants ---
+POP_SIZE = 50
+GENERATIONS = 100
+CROSSOVER_PROB = 0.8
+MUTATION_PROB = 0.2
+
+# Allowable stress (simplified)
+ALLOWABLE_STRESS = 250  # MPa
+LOAD = 10000  # N
+LENGTH = 200  # cm (span)
+
+# Design bounds
+BOUNDS = {
+    'w': (5, 20),    # flange width (cm)
+    'h': (10, 50),   # beam height (cm)
+    't': (0.5, 5)    # web thickness (cm)
+}
+
+# Chromosome = [w, h, t]
+def random_chromosome():
+    return [
+        random.uniform(*BOUNDS['w']),
+        random.uniform(*BOUNDS['h']),
+        random.uniform(*BOUNDS['t'])
+    ]
+
+class Chromosome(list):
+    pass
+
+def as_chromosome(gene_list):
+    return Chromosome(gene_list)
+
+def moment_of_inertia(w, h, t):
+    return (w * h**3 - (w - t) * (h - 2*t)**3) / 12
+
+def fitness_function(ch):
+    w, h, t = ch
+
+    # Geometry constraints
+    if w <= t or h <= 2*t:
+        return 0  # infeasible
+
+    # Moment of inertia and stress under bending
+    I = moment_of_inertia(w, h, t)
+    if I <= 0:
+        return 0
+
+    M = LOAD * LENGTH / 4  # max bending moment at center
+    stress = M * (h/2) / I
+
+    if stress > ALLOWABLE_STRESS:
+        return 0  # violate stress constraint
+
+    # Objective: minimize area (weight)
+    area = 2 * (w * t) + (h - 2 * t) * t
+    fitness = 1 / area  # inverse because we minimize area
+    return fitness
+
+def generate_population(n):
+    return [as_chromosome(random_chromosome()) for _ in range(n)]
+
+def evaluate_fitness(pop):
+    for c in pop:
+        setattr(c, 'fitness', fitness_function(c))
+
+def select(pop):
+    total_fitness = sum(c.fitness for c in pop)
+    pick = random.uniform(0, total_fitness)
+    current = 0
+    for c in pop:
+        current += c.fitness
+        if current >= pick:
+            return c
+
+def crossover(p1, p2):
+    point = random.randint(1, len(p1) - 1)
+    child1 = p1[:point] + p2[point:]
+    child2 = p2[:point] + p1[point:]
+    return child1, child2
+
+def mutate(ch):
+    idx = random.randint(0, len(ch) - 1)
+    param_keys = list(BOUNDS.keys())
+    param = param_keys[idx]
+    ch[idx] = random.uniform(*BOUNDS[param])
+    return ch
+
+def best_chromosome(pop):
+    return max(pop, key=lambda c: c.fitness)
+
+# --- Main GA Loop ---
+population = generate_population(POP_SIZE)
+evaluate_fitness(population)
+
+for gen in range(GENERATIONS):
+    new_population = []
+
+    while len(new_population) < POP_SIZE:
+        p1 = select(population)
+        p2 = select(population)
+
+        if random.random() < CROSSOVER_PROB:
+            c1_genes, c2_genes = crossover(p1, p2)
+        else:
+            c1_genes = p1[:]
+            c2_genes = p2[:]
+
+        if random.random() < MUTATION_PROB:
+            c1_genes = mutate(c1_genes)
+        if random.random() < MUTATION_PROB:
+            c2_genes = mutate(c2_genes)
+
+        new_population.append(as_chromosome(c1_genes))
+        new_population.append(as_chromosome(c2_genes))
+
+    population = new_population
+    evaluate_fitness(population)
+
+# --- Results ---
+best = best_chromosome(population)
+w, h, t = best
+area = 2 * (w * t) + (h - 2 * t) * t
+I = moment_of_inertia(w, h, t)
+M = LOAD * LENGTH / 4
+stress = M * (h/2) / I
+
+print("Best Design Found:")
+print(f"  Width w: {w:.2f} cm")
+print(f"  Height h: {h:.2f} cm")
+print(f"  Web Thickness t: {t:.2f} cm")
+print(f"  Cross-sectional Area: {area:.2f} cm^2")
+print(f"  Max Stress: {stress:.2f} MPa")
+print(f"  Fitness (1/area): {best.fitness:.4f}")
+
+OUTPUT:
+Best Design Found:
+  Width w: 16.60 cm
+  Height h: 49.66 cm
+  Web Thickness t: 1.83 cm
+  Cross-sectional Area: 145.16 cm^2
+  Max Stress: 249.88 MPa
+  Fitness (1/area): 0.0069

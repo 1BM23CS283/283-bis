@@ -1,0 +1,135 @@
+import random
+import numpy as np
+
+
+def gene_expression_algorithm(n, G, g, Pc, Pm, fitness_func, express_func):
+    population = generate_random_population(n, g)
+
+    for chrom in population:
+        phenotype = express_func(chrom["genome"])
+        chrom["fitness"] = fitness_func(phenotype)
+
+    for _ in range(G):
+        new_population = []
+
+        while len(new_population) < n:
+            parent1 = select(population)
+            parent2 = select(population)
+
+            if random.random() < Pc:
+                child1, child2 = crossover(parent1["genome"], parent2["genome"])
+            else:
+                child1, child2 = parent1["genome"][:], parent2["genome"][:]
+
+            if random.random() < Pm:
+                child1 = mutate(child1, g)
+            if random.random() < Pm:
+                child2 = mutate(child2, g)
+
+            pheno1 = express_func(child1)
+            pheno2 = express_func(child2)
+
+            new_population.append({
+                "genome": child1,
+                "fitness": fitness_func(pheno1)
+            })
+            if len(new_population) < n:
+                new_population.append({
+                    "genome": child2,
+                    "fitness": fitness_func(pheno2)
+                })
+
+        population = new_population
+
+    return best_chromosome(population)
+
+
+def generate_random_population(n, g):
+    return [{
+        "genome": [random.random() for _ in range(g)],
+        "fitness": None
+    } for _ in range(n)]
+
+def crossover(parent1, parent2):
+    alpha = random.random()
+    child1 = [alpha * p1 + (1 - alpha) * p2 for p1, p2 in zip(parent1, parent2)]
+    child2 = [alpha * p2 + (1 - alpha) * p1 for p1, p2 in zip(parent1, parent2)]
+    return child1, child2
+
+def mutate(chromosome, g):
+    new_chrom = chromosome[:]
+    idx = random.randint(0, g - 1)
+    # Small mutation added, keep between 0 and 1
+    new_chrom[idx] += random.uniform(-0.1, 0.1)
+    new_chrom[idx] = max(0, min(new_chrom[idx], 1))
+    return new_chrom
+
+def select(population, tournament_size=3):
+    candidates = random.sample(population, tournament_size)
+    return max(candidates, key=lambda x: x["fitness"])
+
+def best_chromosome(population):
+    return max(population, key=lambda x: x["fitness"])
+
+
+
+def express_func(chromosome):
+    # Normalize to sum to 1 (portfolio weights)
+    total = sum(chromosome)
+    if total == 0:
+        return [1/len(chromosome)] * len(chromosome)  # Equal weights fallback
+    return [w / total for w in chromosome]
+
+def fitness_func(weights):
+    # Parameters
+    mu = np.array([0.12, 0.10, 0.07, 0.15])  # Expected returns for 4 assets
+    cov = np.array([
+        [0.0064, 0.0008, 0.0011, 0.0],
+        [0.0008, 0.0025, 0.0018, 0.0],
+        [0.0011, 0.0018, 0.0036, 0.0],
+        [0.0,    0.0,    0.0,    0.0050]
+    ])  # Covariance matrix
+    risk_free_rate = 0.01
+
+    weights = np.array(weights)
+    if any(weights < 0) or abs(sum(weights) - 1) > 1e-4:
+        # Penalize invalid portfolios
+        return -1e10
+
+    portfolio_return = np.dot(mu, weights)
+    portfolio_variance = np.dot(weights.T, np.dot(cov, weights))
+    portfolio_std = np.sqrt(portfolio_variance)
+
+    if portfolio_std == 0:
+        return -1e10
+
+    sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_std
+    return sharpe_ratio  # maximize Sharpe Ratio
+
+
+
+if __name__ == "__main__":
+    N_ASSETS = 4
+    best = gene_expression_algorithm(
+        n=50,    # population size
+        G=100,   # generations
+        g=N_ASSETS,  # chromosome length = number of assets
+        Pc=0.8,  # crossover probability
+        Pm=0.3,  # mutation probability
+        fitness_func=fitness_func,
+        express_func=express_func
+    )
+
+    print("Best portfolio weights:")
+    for i, w in enumerate(best["genome"]):
+        print(f"Asset {i+1}: {w:.4f}")
+    print(f"Best fitness (Sharpe Ratio): {best['fitness']:.4f}")
+
+
+OUTPUT:
+Best portfolio weights:
+Asset 1: 0.3172
+Asset 2: 0.7628
+Asset 3: 0.0000
+Asset 4: 0.6723
+Best fitness (Sharpe Ratio): 2.8693

@@ -1,0 +1,111 @@
+import random
+import numpy as np
+
+
+graph = np.array([
+    [0, 1, 4, 0, 0, 0],
+    [1, 0, 4, 2, 7, 0],
+    [4, 4, 0, 3, 5, 0],
+    [0, 2, 3, 0, 2, 3],
+    [0, 7, 5, 2, 0, 1],
+    [0, 0, 0, 3, 1, 0]
+])
+
+num_nodes = len(graph)
+source = 0
+destination = 5
+
+num_nests = 15
+pa = 0.25  
+max_iter = 150
+
+
+def generate_path():
+    path = [source]
+    while path[-1] != destination:
+        neighbors = [i for i in range(num_nodes) if graph[path[-1]][i] > 0 and i not in path]
+        if not neighbors:
+         
+            return generate_path()
+        next_node = random.choice(neighbors)
+        path.append(next_node)
+    return path
+
+
+def fitness(path):
+    delay = 0
+    for i in range(len(path) - 1):
+        delay += graph[path[i]][path[i+1]]
+    return delay
+
+
+def levy_flight(path):
+    new_path = path[:]
+ 
+    if len(new_path) > 2:
+        idx = random.randint(1, len(new_path) - 2)
+      
+        neighbors = [i for i in range(num_nodes) if graph[new_path[idx-1]][i] > 0 and i != new_path[idx]]
+        if neighbors:
+            new_path[idx] = random.choice(neighbors)
+            
+            new_path = remove_loops(new_path)
+    return new_path
+
+
+def remove_loops(path):
+    seen = set()
+    new_path = []
+    for node in path:
+        if node in seen:
+          
+            idx = new_path.index(node)
+            new_path = new_path[:idx+1]
+        else:
+            new_path.append(node)
+            seen.add(node)
+    
+    if new_path[-1] != destination:
+        new_path.append(destination)
+    return new_path
+
+
+nests = [generate_path() for _ in range(num_nests)]
+fitnesses = [fitness(n) for n in nests]
+
+best_idx = np.argmin(fitnesses)
+best_nest = nests[best_idx]
+best_fitness = fitnesses[best_idx]
+
+for iter in range(max_iter):
+    
+    new_nests = []
+    for nest in nests:
+        new_nest = levy_flight(nest)
+        new_nests.append(new_nest)
+    
+    
+    new_fitnesses = [fitness(n) for n in new_nests]
+  
+    for i in range(num_nests):
+        if new_fitnesses[i] < fitnesses[i]:
+            nests[i] = new_nests[i]
+            fitnesses[i] = new_fitnesses[i]
+    
+    for i in range(num_nests):
+        if random.random() < pa:
+            nests[i] = generate_path()
+            fitnesses[i] = fitness(nests[i])
+    
+    
+    current_best_idx = np.argmin(fitnesses)
+    current_best_fit = fitnesses[current_best_idx]
+    if current_best_fit < best_fitness:
+        best_fitness = current_best_fit
+        best_nest = nests[current_best_idx]
+    
+    if iter % 10 == 0:
+        print(f"Iteration {iter}: Best delay = {best_fitness}")
+
+print("Best path found:", best_nest)
+print("With total delay:", best_fitness)

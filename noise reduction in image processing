@@ -1,0 +1,55 @@
+import cv2
+import numpy as np
+from multiprocessing import Pool, cpu_count
+import matplotlib.pyplot as plt
+
+def denoise_segment(segment):
+    # Denoise a segment using Non-Local Means
+    return cv2.fastNlMeansDenoisingColored(segment, None, 10, 10, 7, 15)
+
+def split_image(image, num_segments):
+    # Split the image vertically into num_segments parts
+    h, w, c = image.shape
+    segment_height = h // num_segments
+    segments = []
+    for i in range(num_segments):
+        start = i * segment_height
+        end = (i + 1) * segment_height if i < num_segments - 1 else h
+        segments.append(image[start:end, :, :])
+    return segments
+
+def combine_segments(segments):
+    # Combine vertically stacked segments
+    return np.vstack(segments)
+
+def show_images(orig, denoised):
+    # Display images side by side
+    plt.subplot(121), plt.imshow(cv2.cvtColor(orig, cv2.COLOR_BGR2RGB)), plt.title('Original')
+    plt.subplot(122), plt.imshow(cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB)), plt.title('Denoised')
+    plt.show()
+
+if __name__ == "__main__":
+    # Read input image. Replace 'noisy_image.png' with your file path!
+    img = cv2.imread('J13Wn.jpg') # Corrected filename
+    
+    # Error handling if image is not loaded
+    if img is None:
+        print("Error: Image file not found or could not be loaded.")
+    else:
+        num_workers = cpu_count()
+
+        # Split image into segments for parallel processing
+        segments = split_image(img, num_workers)
+
+        # Parallel denoising
+        with Pool(processes=num_workers) as pool:
+            results = pool.map(denoise_segment, segments)
+
+        # Combine results
+        denoised_img = combine_segments(results)
+
+        # Save output
+        cv2.imwrite('denoised_image.png', denoised_img)
+
+        # Display results
+        show_images(img, denoised_img)

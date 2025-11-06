@@ -1,0 +1,245 @@
+# gwo_reliability.py
+# Grey Wolf Optimization (GWO) for Reliability-Redundancy Allocation (series system)
+# Python 3.9+
+
+from __future__ import annotations
+import math
+import random
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
+
+@dataclass
+class RRAData:
+    # Per-subsystem parameters (arrays of equal length m)
+    p: List[float]          # component reliability for subsystem i (0<p_i<1)
+    c: List[float]          # cost per component in subsystem i
+    w: Optional[List[float]] = None  # weight per component (optional)
+    max_red: Optional[List[int]] = None  # max redundancy per subsystem (>=1)
+
+    # System-level constraints
+    budget: Optional[float] = None
+    weight_limit: Optional[float] = None
+
+    def __post_init__(self):
+        m = len(self.p)
+        assert len(self.c) == m
+        if self.w is not None:
+            assert len(self.w) == m
+        if self.max_red is None:
+            self.max_red = [5] * m  # default caps
+        else:
+            assert len(self.max_red) == m
+
+def subsystem_reliability(p: float, x: int) -> float:
+    # Reliability of x identical parallel components
+    x = max(1, x)
+    return 1.0 - (1.0 - p) ** x
+
+def system_reliability(x: List[int], data: RRAData) -> float:
+    R = 1.0
+    for xi, pi in zip(x, data.p):
+        Ri = subsystem_reliability(pi, xi)
+        R *= Ri
+        if R <= 0.0:
+            return 0.0
+    return R
+
+def totals(x: List[int], data: RRAData) -> Tuple[float, float]:
+    tot_cost = sum(ci * xi for ci, xi in zip(data.c, x))
+    tot_weight = sum((wi * xi) for wi, xi in zip(data.w or [0.0]*len(x), x))
+    return tot_cost, tot_weight
+
+def penalty(x: List[int], data: RRAData) -> float:
+    """Quadratic penalty for constraint violations (0 if feasible)."""
+    tot_cost, tot_weight = totals(x, data)
+    v_cost = max(0.0, (tot_cost - (data.budget if data.budget is not None else float('inf'))))
+    v_weight = 0.0
+    if data.weight_limit is not None and data.w is not None:
+        v_weight = max(0.0, tot_weight - data.weight_limit)
+    # Scale penalties relative to typical magnitudes
+    # Add small eps to avoid division by zero if limits are None
+    scale_c = (data.budget if data.budget is not None else (tot_cost + 1.0))
+    scale_w = (data.weight_limit if data.weight_limit is not None else (tot_weight + 1.0))
+    return 1e3 * (v_cost / (scale_c + 1e-9))**2 + 1e3 * (v_weight / (scale_w + 1e-9))**2
+
+def objective(x_cont: List[float], data: RRAData) -> float:
+    """
+    GWO minimizes; we minimize negative reliability + penalty.
+    x_cont are continuous; we round/clamp to integers for evaluation.
+    """
+    x = []
+    for val, xmax in zip(x_cont, data.max_red):
+        xi = int(round(val))
+        xi = max(1, min(xi, xmax))
+        x.append(xi)
+    R = system_reliability(x, data)
+    pen = penalty(x, data)
+    return -(R) + pen  # minimize
+
+def clamp_position(pos: List[float], data: RRAData) -> List[float]:
+    out = []
+    for v, xmax in zip(pos, data.max_red):
+        out.append(min(max(v, 1.0), float(xmax)))
+    return out
+
+class GreyWolfOptimizer:
+    """
+    Vanilla Grey Wolf Optimizer (discrete-by-rounding).
+    """
+    def __init__(self,
+                 data: RRAData,
+                 n_wolves: int = 30,
+                 n_iters: int = 300,
+                 a0: float = 2.0,
+                 seed: Optional[int] = 42):
+        self.data = data
+        self.m = len(data.p)
+        self.n_wolves = n_wolves
+        self.n_iters = n_iters
+        self.a0 = a0
+        if seed is not None:
+            random.seed(seed)
+
+        # Initialize population uniformly in [1, max_red[i]]
+        self.pop: List[List[float]] = [
+            [random.uniform(1.0, float(xmax)) for xmax in data.max_red] for _ in range(n_wolves)
+        ]
+        self.fvals: List[float] = [objective(x, data) for x in self.pop]
+
+        # Alpha (best), Beta (2nd), Delta (3rd)
+        self.alpha = None  # type: Optional[List[float]]
+        self.beta = None
+        self.delta = None
+        self.alpha_val = float('inf')
+        self.beta_val = float('inf')
+        self.delta_val = float('inf')
+
+        self._update_leaders()
+
+    def _update_leaders(self):
+        # sort by fitness ascending (minimization)
+        ranked = sorted(zip(self.fvals, self.pop), key=lambda t: t[0])
+        self.alpha_val, self.alpha = ranked[0]
+        self.beta_val, self.beta = ranked[1]
+        self.delta_val, self.delta = ranked[2]
+
+    def step(self, t: int):
+        # linearly decrease a from a0 to 0
+        a = self.a0 * (1 - t / max(1, self.n_iters - 1))
+
+        new_pop: List[List[float]] = []
+        new_f: List[float] = []
+        for i in range(self.n_wolves):
+            X = self.pop[i]
+            X1 = []
+            X2 = []
+            X3 = []
+            for d in range(self.m):
+                # Random coefficients in [0,1]
+                r1a, r2a = random.random(), random.random()
+                r1b, r2b = random.random(), random.random()
+                r1c, r2c = random.random(), random.random()
+
+                A1 = 2 * a * r1a - a
+                C1 = 2 * r2a
+                A2 = 2 * a * r1b - a
+                C2 = 2 * r2b
+                A3 = 2 * a * r1c - a
+                C3 = 2 * r2c
+
+                D_alpha = abs(C1 * self.alpha[d] - X[d])
+                D_beta  = abs(C2 * self.beta[d]  - X[d])
+                D_delta = abs(C3 * self.delta[d] - X[d])
+
+                X1d = self.alpha[d] - A1 * D_alpha
+                X2d = self.beta[d]  - A2 * D_beta
+                X3d = self.delta[d] - A3 * D_delta
+
+                X1.append(X1d); X2.append(X2d); X3.append(X3d)
+
+            X_new = [(x1 + x2 + x3) / 3.0 for x1, x2, x3 in zip(X1, X2, X3)]
+            X_new = clamp_position(X_new, self.data)
+            f_new = objective(X_new, self.data)
+
+            new_pop.append(X_new)
+            new_f.append(f_new)
+
+        self.pop = new_pop
+        self.fvals = new_f
+        self._update_leaders()
+
+    def run(self, verbose: bool = True) -> Tuple[List[int], float, dict]:
+        history = []
+        for t in range(self.n_iters):
+            self.step(t)
+            if verbose and (t % max(1, self.n_iters // 10) == 0 or t == self.n_iters - 1):
+                print(f"[iter {t+1:4d}] best (−R+pen)={self.alpha_val:.6f}")
+            history.append(self.alpha_val)
+
+        # Convert best continuous to integer solution
+        best_cont = self.alpha
+        best_x = [int(round(v)) for v in best_cont]
+        # clamp to bounds
+        best_x = [max(1, min(xi, xmax)) for xi, xmax in zip(best_x, self.data.max_red)]
+        best_R = system_reliability(best_x, self.data)
+        feas_pen = penalty(best_x, self.data)
+        return best_x, best_R, {
+            "objective": -best_R + feas_pen,
+            "cost_weight": totals(best_x, self.data),
+            "history": history
+        }
+
+# --------------------
+# Example usage
+# --------------------
+if __name__ == "__main__":
+    # Example dataset (5 subsystems)
+    # Each subsystem has component reliability p_i and cost c_i per component.
+    data = RRAData(
+        p=[0.90, 0.92, 0.88, 0.93, 0.91],
+        c=[12.0, 10.0, 9.0, 11.0, 8.0],
+        w=[1.6, 1.2, 1.4, 1.5, 1.0],      # optional weight per component
+        max_red=[6, 6, 6, 6, 6],          # cap per subsystem
+        budget=120.0,                     # total cost constraint (optional)
+        weight_limit=18.0                 # total weight constraint (optional)
+    )
+
+    gwo = GreyWolfOptimizer(
+        data=data,
+        n_wolves=35,
+        n_iters=400,
+        a0=2.0,
+        seed=123
+    )
+
+    best_x, best_R, info = gwo.run(verbose=True)
+
+    tot_cost, tot_weight = info["cost_weight"]
+    print("\n=== GWO Result (Reliability Optimization) ===")
+    print("Best redundancy vector x (per subsystem):", best_x)
+    print("System reliability R(x):", f"{best_R:.8f}")
+    print("Total cost:", f"{tot_cost:.2f}")
+    print("Total weight:", f"{tot_weight:.2f}")
+    print("Feasible (budget/weight):",
+          ("Yes" if (data.budget is None or tot_cost <= data.budget) and
+           (data.weight_limit is None or tot_weight <= data.weight_limit) else "No"))
+
+OUTPUT:
+[iter    1] best (−R+pen)=-0.963059
+[iter   41] best (−R+pen)=-0.920857
+[iter   81] best (−R+pen)=-0.974981
+[iter  121] best (−R+pen)=-0.974981
+[iter  161] best (−R+pen)=-0.976440
+[iter  201] best (−R+pen)=-0.976440
+[iter  241] best (−R+pen)=-0.976440
+[iter  281] best (−R+pen)=-0.976440
+[iter  321] best (−R+pen)=-0.976440
+[iter  361] best (−R+pen)=-0.976440
+[iter  400] best (−R+pen)=-0.976440
+
+=== GWO Result (Reliability Optimization) ===
+Best redundancy vector x (per subsystem): [2, 2, 3, 2, 3]
+System reliability R(x): 0.97644026
+Total cost: 117.00
+Total weight: 15.80
+Feasible (budget/weight): Yes

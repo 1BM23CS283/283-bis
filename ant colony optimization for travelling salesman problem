@@ -1,0 +1,269 @@
+# aco_tsp.py
+# Ant Colony Optimization for the Traveling Salesman Problem
+# Author: (you)
+# Python 3.9+
+
+from __future__ import annotations
+import math
+import random
+from typing import List, Tuple, Optional
+
+City = Tuple[float, float]
+Tour = List[int]
+
+class TSPEngine:
+    """
+    Handles distances for a TSP instance. Construct with coordinates OR a distance matrix.
+    """
+    def __init__(self,
+                 coords: Optional[List[City]] = None,
+                 dist_matrix: Optional[List[List[float]]] = None) -> None:
+        if coords is None and dist_matrix is None:
+            raise ValueError("Provide either coords or dist_matrix.")
+        if coords is not None and dist_matrix is not None:
+            raise ValueError("Provide only one of coords or dist_matrix.")
+
+        if coords is not None:
+            self.n = len(coords)
+            self.coords = coords
+            self.dist = self._build_dist_from_coords(coords)
+        else:
+            self.n = len(dist_matrix)  # type: ignore
+            self.coords = None
+            self.dist = dist_matrix  # type: ignore
+
+        # Precompute heuristic visibility: eta[i][j] = 1 / distance, j != i
+        self.eta = [[0.0]*self.n for _ in range(self.n)]
+        for i in range(self.n):
+            for j in range(self.n):
+                if i != j and self.dist[i][j] > 0:
+                    self.eta[i][j] = 1.0 / self.dist[i][j]
+
+    @staticmethod
+    def _build_dist_from_coords(coords: List[City]) -> List[List[float]]:
+        n = len(coords)
+        d = [[0.0]*n for _ in range(n)]
+        for i in range(n):
+            xi, yi = coords[i]
+            for j in range(i+1, n):
+                xj, yj = coords[j]
+                dij = math.hypot(xi - xj, yi - yj)
+                d[i][j] = d[j][i] = dij if dij > 0 else 1e-12  # avoid div-by-zero
+        return d
+
+    def tour_length(self, tour: Tour) -> float:
+        total = 0.0
+        for i in range(len(tour)):
+            a = tour[i]
+            b = tour[(i + 1) % len(tour)]
+            total += self.dist[a][b]
+        return total
+
+
+class ACO_TSP:
+    """
+    Ant Colony Optimization for TSP.
+
+    Parameters:
+        n_ants: number of ants per iteration (≈ number of cities is a common start)
+        n_iterations: number of iterations
+        alpha: pheromone influence
+        beta: heuristic (1/distance) influence
+        rho: pheromone evaporation rate in (0,1]
+        Q: pheromone deposit factor (pheromone ~ Q / tour_length)
+        tau0: initial pheromone on all edges; if None uses 1 / (n * L_nn) heuristic
+        seed: RNG seed for reproducibility
+        global_best_weight: extra pheromone multiplier for best-so-far tour (0 disables)
+    """
+    def __init__(self,
+                 engine: TSPEngine,
+                 n_ants: int = 20,
+                 n_iterations: int = 200,
+                 alpha: float = 1.0,
+                 beta: float = 5.0,
+                 rho: float = 0.5,
+                 Q: float = 100.0,
+                 tau0: Optional[float] = None,
+                 seed: Optional[int] = 42,
+                 global_best_weight: float = 2.0) -> None:
+        if seed is not None:
+            random.seed(seed)
+
+        self.E = engine
+        self.n = engine.n
+        self.n_ants = n_ants
+        self.n_iterations = n_iterations
+        self.alpha = alpha
+        self.beta = beta
+        self.rho = max(1e-9, min(1.0, rho))
+        self.Q = Q
+        self.global_best_weight = global_best_weight
+
+        # Initialize pheromone matrix
+        if tau0 is None:
+            # Use a quick nearest-neighbor tour to set a scale for tau0
+            L_nn = self._nearest_neighbor_length()
+            tau0 = 1.0 / (self.n * L_nn) if L_nn > 0 else 1.0
+        self.tau = [[tau0 for _ in range(self.n)] for _ in range(self.n)]
+
+        self.best_tour: Optional[Tour] = None
+        self.best_length: float = float("inf")
+
+    def _nearest_neighbor_length(self) -> float:
+        start = 0
+        unvisited = set(range(self.n))
+        unvisited.remove(start)
+        tour = [start]
+        cur = start
+        while unvisited:
+            nxt = min(unvisited, key=lambda j: self.E.dist[cur][j])
+            tour.append(nxt)
+            unvisited.remove(nxt)
+            cur = nxt
+        return self.E.tour_length(tour)
+
+    def _choose_next(self, i: int, allowed: set[int]) -> int:
+        # Probabilities ~ (tau[i][j]^alpha) * (eta[i][j]^beta)
+        weights = []
+        cities = []
+        total = 0.0
+        for j in allowed:
+            t = self.tau[i][j] ** self.alpha
+            e = self.E.eta[i][j] ** self.beta
+            w = t * e
+            weights.append(w)
+            cities.append(j)
+            total += w
+        if total <= 0:
+            # fallback: uniform random among allowed
+            return random.choice(list(allowed))
+        # Roulette wheel
+        r = random.random() * total
+        csum = 0.0
+        for w, j in zip(weights, cities):
+            csum += w
+            if csum >= r:
+                return j
+        return cities[-1]
+
+    def _construct_solution(self, start_city: Optional[int] = None) -> Tour:
+        if start_city is None:
+            start_city = random.randrange(self.n)
+        allowed = set(range(self.n))
+        allowed.remove(start_city)
+        tour = [start_city]
+        cur = start_city
+        while allowed:
+            nxt = self._choose_next(cur, allowed)
+            tour.append(nxt)
+            allowed.remove(nxt)
+            cur = nxt
+        return tour
+
+    def _evaporate(self) -> None:
+        factor = (1.0 - self.rho)
+        for i in range(self.n):
+            row = self.tau[i]
+            for j in range(self.n):
+                row[j] *= factor
+
+    def _deposit(self, tours: List[Tuple[Tour, float]]) -> None:
+        # add pheromone proportional to 1 / tour_length
+        for tour, L in tours:
+            d_tau = self.Q / L if L > 0 else 0.0
+            for k in range(self.n):
+                a = tour[k]
+                b = tour[(k + 1) % self.n]
+                self.tau[a][b] += d_tau
+                self.tau[b][a] += d_tau
+
+    def _deposit_best_so_far(self) -> None:
+        if self.best_tour is None or self.global_best_weight <= 0:
+            return
+        L = self.best_length
+        d_tau = self.global_best_weight * (self.Q / L if L > 0 else 0.0)
+        for k in range(self.n):
+            a = self.best_tour[k]
+            b = self.best_tour[(k + 1) % self.n]
+            self.tau[a][b] += d_tau
+            self.tau[b][a] += d_tau
+
+    def run(self, verbose: bool = True) -> Tuple[Tour, float]:
+        for it in range(1, self.n_iterations + 1):
+            # Construct solutions
+            batch: List[Tuple[Tour, float]] = []
+            for _ in range(self.n_ants):
+                tour = self._construct_solution()
+                L = self.E.tour_length(tour)
+                batch.append((tour, L))
+                if L < self.best_length:
+                    self.best_length = L
+                    self.best_tour = tour[:]
+
+            # Update pheromones
+            self._evaporate()
+            self._deposit(batch)
+            self._deposit_best_so_far()
+
+            if verbose and it % max(1, self.n_iterations // 10) == 0:
+                print(f"[iter {it:4d}] best length = {self.best_length:.4f}")
+
+        # type: ignore: best_tour is set when any tour is found
+        return self.best_tour, self.best_length  # type: ignore
+
+
+# ----------------------------
+# Example usage (run directly)
+# ----------------------------
+if __name__ == "__main__":
+    # Example 1: Use random Euclidean points
+    random.seed(7)
+    n_cities = 20
+    coords = [(random.uniform(0, 100), random.uniform(0, 100)) for _ in range(n_cities)]
+    engine = TSPEngine(coords=coords)
+
+    aco = ACO_TSP(
+        engine=engine,
+        n_ants=20,           # try also: n_ants = n_cities
+        n_iterations=200,    # increase for better results
+        alpha=1.0,
+        beta=5.0,
+        rho=0.5,
+        Q=100.0,
+        tau0=None,           # let it auto-scale from a NN tour
+        seed=123,
+        global_best_weight=2.0
+    )
+
+    best_tour, best_length = aco.run(verbose=True)
+    print("\nBest tour order (0-indexed):", best_tour)
+    print("Best tour length:", round(best_length, 4))
+
+    # Example 2: Use a custom distance matrix instead of coords
+    # dist = [
+    #     [0,   2,   9,  10],
+    #     [1,   0,   6,   4],
+    #     [15,  7,   0,   8],
+    #     [6,   3,  12,   0],
+    # ]
+    # engine2 = TSPEngine(dist_matrix=dist)
+    # aco2 = ACO_TSP(engine2, n_ants=10, n_iterations=100, seed=1)
+    # best_tour2, best_length2 = aco2.run(verbose=False)
+    # print("\nCustom matrix best tour:", best_tour2)
+    # print("Custom matrix best length:", round(best_length2, 4))
+
+OUTPUT:
+[iter   20] best length = 355.0318
+[iter   40] best length = 355.0318
+[iter   60] best length = 355.0318
+[iter   80] best length = 355.0318
+[iter  100] best length = 355.0318
+[iter  120] best length = 355.0318
+[iter  140] best length = 355.0318
+[iter  160] best length = 355.0318
+[iter  180] best length = 355.0318
+[iter  200] best length = 355.0318
+
+Best tour order (0-indexed): [19, 14, 3, 4, 7, 17, 5, 12, 0, 16, 1, 10, 11, 18, 15, 9, 2, 8, 6, 13]
+Best tour length: 355.0318
+
